@@ -440,7 +440,7 @@ def main() -> None:
             d_model=CONFIG["d_model"],
             warmup_steps=CONFIG["warmup_steps"],
         )
-        scheduler.step()  # prime step 1 before the first optimizer update
+        scheduler.step()
 
     criterion = LabelSmoothingLoss(
         vocab_size=tgt_vocab_size,
