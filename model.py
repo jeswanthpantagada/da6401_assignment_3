@@ -267,7 +267,14 @@ class Transformer(nn.Module):
     def infer(self, src_sentence: str) -> str:
         self.eval()
         import spacy
-        spacy_de = spacy.load('de_core_news_sm')
+        
+        try:
+            spacy_de = spacy.load('de_core_news_sm')
+        except OSError:
+            import spacy.cli
+            spacy.cli.download('de_core_news_sm')
+            spacy_de = spacy.load('de_core_news_sm')
+            
         tokens = [tok.text for tok in spacy_de.tokenizer(src_sentence)]
         
         device = next(self.parameters()).device
