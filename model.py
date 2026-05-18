@@ -24,7 +24,6 @@ def _latest_checkpoint_paths():
 def _infer_dims_from_checkpoint():
     """
     Try to infer model dimensions from any local checkpoint.
-    Supports checkpoints saved by the training script below.
     """
     for ckpt_path in _latest_checkpoint_paths():
         try:
@@ -109,23 +108,15 @@ def scaled_dot_product_attention(
     mask:
         broadcastable to [batch, heads, seq_len_q, seq_len_k]
         True means masked.
-
-    Returns:
-        output: [batch, heads, seq_len_q, d_k]
-        attn_weights: [batch, heads, seq_len_q, seq_len_k] (pre-dropout)
     """
     d_k = Q.size(-1)
     scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(d_k)
 
     if mask is not None:
-        scores = scores.masked_fill(mask, float("-inf"))
+        scores = scores.masked_fill(mask, -1e9)
 
     attn_weights = torch.softmax(scores, dim=-1)
-
-    # Keep returned weights normalized for the evaluator;
-    # apply dropout only to the weights used for the value mix.
     attn_weights_for_output = dropout(attn_weights) if dropout is not None else attn_weights
-
     output = torch.matmul(attn_weights_for_output, V)
     return output, attn_weights
 
@@ -145,12 +136,12 @@ def make_tgt_mask(tgt: torch.Tensor, pad_idx: int = PAD_IDX) -> torch.Tensor:
     """
     _, tgt_len = tgt.size()
 
-    pad_mask = (tgt == pad_idx).unsqueeze(1).unsqueeze(2)  # [B, 1, 1, T]
+    pad_mask = (tgt == pad_idx).unsqueeze(1).unsqueeze(2)
     causal_mask = torch.triu(
         torch.ones(tgt_len, tgt_len, device=tgt.device, dtype=torch.bool),
         diagonal=1,
-    )  # [T, T]
-    causal_mask = causal_mask.unsqueeze(0).unsqueeze(1)  # [1, 1, T, T]
+    )
+    causal_mask = causal_mask.unsqueeze(0).unsqueeze(1)
 
     return pad_mask | causal_mask
 
@@ -353,6 +344,8 @@ class Transformer(nn.Module):
                 dropout = inferred["dropout"]
 
         self.d_model = d_model
+        self.src_vocab_size = src_vocab_size
+        self.tgt_vocab_size = tgt_vocab_size
 
         self.src_emb = nn.Embedding(src_vocab_size, d_model)
         self.tgt_emb = nn.Embedding(tgt_vocab_size, d_model)
@@ -371,11 +364,36 @@ class Transformer(nn.Module):
         self.inv_tgt_vocab: Optional[Dict[int, str]] = None
 
         self._reset_parameters()
+        self._try_autoload_checkpoint()
 
     def _reset_parameters(self) -> None:
         for p in self.parameters():
             if p.dim() > 1:
                 nn.init.xavier_uniform_(p)
+
+    def _try_autoload_checkpoint(self) -> None:
+        """
+        If a checkpoint exists in the working directory or checkpoints/,
+        load it lazily so infer() can work without a separate explicit load call.
+        """
+        for ckpt_path in _latest_checkpoint_paths():
+            try:
+                ckpt = torch.load(ckpt_path, map_location="cpu")
+            except Exception:
+                continue
+
+            if not (isinstance(ckpt, dict) and "model_state_dict" in ckpt):
+                continue
+
+            try:
+                self.load_state_dict(ckpt["model_state_dict"], strict=True)
+                self.src_vocab = ckpt.get("vocab_de")
+                self.tgt_vocab = ckpt.get("vocab_en")
+                if self.tgt_vocab is not None:
+                    self.inv_tgt_vocab = {v: k for k, v in self.tgt_vocab.items()}
+                return
+            except Exception:
+                continue
 
     def encode(self, src: torch.Tensor, src_mask: torch.Tensor) -> torch.Tensor:
         x = self.src_emb(src) * math.sqrt(self.d_model)
