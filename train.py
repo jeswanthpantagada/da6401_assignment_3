@@ -77,16 +77,12 @@ def load_spacy_models():
     try:
         spacy_de = spacy.load("de_core_news_sm")
     except OSError:
-        import spacy.cli
-        spacy.cli.download("de_core_news_sm")
-        spacy_de = spacy.load("de_core_news_sm")
+        spacy_de = spacy.blank("de")
 
     try:
         spacy_en = spacy.load("en_core_web_sm")
     except OSError:
-        import spacy.cli
-        spacy.cli.download("en_core_web_sm")
-        spacy_en = spacy.load("en_core_web_sm")
+        spacy_en = spacy.blank("en")
 
     return spacy_de, spacy_en
 
@@ -424,12 +420,21 @@ def load_checkpoint(
 ) -> Dict:
     ckpt = torch.load(path, map_location="cpu")
     model.load_state_dict(ckpt["model_state_dict"])
+    
+    if hasattr(model, "src_vocab"):
+        model.src_vocab = ckpt.get("vocab_de")
+    if hasattr(model, "tgt_vocab"):
+        model.tgt_vocab = ckpt.get("vocab_en")
+    if hasattr(model, "inv_tgt_vocab") and ckpt.get("vocab_en") is not None:
+        model.inv_tgt_vocab = {v: k for k, v in ckpt["vocab_en"].items()}
+    
     if optimizer is not None and "optimizer_state_dict" in ckpt:
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
     if scheduler is not None and ckpt.get("scheduler_state_dict") is not None:
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+    
     return ckpt
-
+    
 
 # =========================
 # Visualization
