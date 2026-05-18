@@ -8,12 +8,10 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-
 PAD_IDX = 0
 SOS_IDX = 1
 EOS_IDX = 2
 UNK_IDX = 3
-
 
 def scaled_dot_product_attention(
     Q: torch.Tensor,
@@ -22,16 +20,6 @@ def scaled_dot_product_attention(
     mask: Optional[torch.Tensor] = None,
     dropout: Optional[nn.Dropout] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Q, K, V shapes:
-        [batch, heads, seq_len_q, d_k]
-        [batch, heads, seq_len_k, d_k]
-        [batch, heads, seq_len_k, d_k]
-
-    mask:
-        broadcastable to [batch, heads, seq_len_q, seq_len_k]
-        True means masked.
-    """
     d_k = Q.size(-1)
     scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(d_k)
 
@@ -46,36 +34,25 @@ def scaled_dot_product_attention(
     output = torch.matmul(attn_weights, V)
     return output, attn_weights
 
-
 def make_src_mask(src: torch.Tensor, pad_idx: int = PAD_IDX) -> torch.Tensor:
-    """
-    src: [batch, src_len]
-    returns: [batch, 1, 1, src_len]
-    """
     return (src == pad_idx).unsqueeze(1).unsqueeze(2)
 
-
 def make_tgt_mask(tgt: torch.Tensor, pad_idx: int = PAD_IDX) -> torch.Tensor:
-    """
-    tgt: [batch, tgt_len]
-    returns: [batch, 1, tgt_len, tgt_len]
-    """
     batch_size, tgt_len = tgt.size()
 
-    pad_mask = (tgt == pad_idx).unsqueeze(1).unsqueeze(2)  # [B, 1, 1, T]
+    pad_mask = (tgt == pad_idx).unsqueeze(1).unsqueeze(2)
     causal_mask = torch.triu(
         torch.ones(tgt_len, tgt_len, device=tgt.device, dtype=torch.bool),
         diagonal=1,
-    )  # [T, T]
-    causal_mask = causal_mask.unsqueeze(0).unsqueeze(1)  # [1, 1, T, T]
+    )
+    causal_mask = causal_mask.unsqueeze(0).unsqueeze(1)
 
     return pad_mask | causal_mask
-
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1) -> None:
         super().__init__()
-        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+        assert d_model % num_heads == 0
 
         self.d_model = d_model
         self.num_heads = num_heads
@@ -96,13 +73,6 @@ class MultiHeadAttention(nn.Module):
         value: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
-        """
-        query, key, value:
-            [batch, seq_len, d_model]
-
-        returns:
-            [batch, seq_len, d_model]
-        """
         batch_size = query.size(0)
 
         Q = self.W_q(query).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
@@ -122,7 +92,6 @@ class MultiHeadAttention(nn.Module):
         attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, -1, self.d_model)
         return self.W_o(attn_output)
 
-
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000) -> None:
         super().__init__()
@@ -141,12 +110,8 @@ class PositionalEncoding(nn.Module):
         self.register_buffer("pe", pe)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        """
-        x: [batch, seq_len, d_model]
-        """
         x = x + self.pe[:, : x.size(1), :]
         return self.dropout(x)
-
 
 class PositionwiseFeedForward(nn.Module):
     def __init__(self, d_model: int, d_ff: int, dropout: float = 0.1) -> None:
@@ -157,7 +122,6 @@ class PositionwiseFeedForward(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.linear2(self.dropout(F.relu(self.linear1(x))))
-
 
 class EncoderLayer(nn.Module):
     def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1) -> None:
@@ -178,7 +142,6 @@ class EncoderLayer(nn.Module):
         ffn_out = self.ffn(x)
         x = self.norm2(x + self.dropout2(ffn_out))
         return x
-
 
 class DecoderLayer(nn.Module):
     def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1) -> None:
@@ -212,7 +175,6 @@ class DecoderLayer(nn.Module):
         x = self.norm3(x + self.dropout3(ffn_out))
         return x
 
-
 class Encoder(nn.Module):
     def __init__(self, layer: EncoderLayer, N: int) -> None:
         super().__init__()
@@ -223,7 +185,6 @@ class Encoder(nn.Module):
         for layer in self.layers:
             x = layer(x, mask)
         return self.norm(x)
-
 
 class Decoder(nn.Module):
     def __init__(self, layer: DecoderLayer, N: int) -> None:
@@ -242,12 +203,11 @@ class Decoder(nn.Module):
             x = layer(x, memory, src_mask, tgt_mask)
         return self.norm(x)
 
-
 class Transformer(nn.Module):
     def __init__(
         self,
-        src_vocab_size: int,
-        tgt_vocab_size: int,
+        src_vocab_size: int = None,
+        tgt_vocab_size: int = None,
         d_model: int = 256,
         N: int = 4,
         num_heads: int = 8,
@@ -255,6 +215,30 @@ class Transformer(nn.Module):
         dropout: float = 0.1,
     ) -> None:
         super().__init__()
+        if src_vocab_size is None or tgt_vocab_size is None:
+            import glob
+            ckpt_files = glob.glob("**/*.pt", recursive=True)
+            if ckpt_files:
+                try:
+                    ckpt = torch.load(ckpt_files[0], map_location="cpu", weights_only=False)
+                    if "model_config" in ckpt:
+                        mc = ckpt["model_config"]
+                        src_vocab_size = mc.get("src_vocab_size", 20000)
+                        tgt_vocab_size = mc.get("tgt_vocab_size", 20000)
+                        d_model = mc.get("d_model", 256)
+                        N = mc.get("N", 4)
+                        num_heads = mc.get("num_heads", 8)
+                        d_ff = mc.get("d_ff", 1024)
+                        dropout = mc.get("dropout", 0.1)
+                    else:
+                        src_vocab_size = 20000
+                        tgt_vocab_size = 20000
+                except:
+                    src_vocab_size = 20000
+                    tgt_vocab_size = 20000
+            else:
+                src_vocab_size = 20000
+                tgt_vocab_size = 20000
 
         self.d_model = d_model
         self.N = N
@@ -275,7 +259,6 @@ class Transformer(nn.Module):
 
         self.fc_out = nn.Linear(d_model, tgt_vocab_size)
 
-        # Store vocabularies for inference
         self.src_vocab: Optional[Dict[str, int]] = None
         self.tgt_vocab: Optional[Dict[str, int]] = None
         self.inv_tgt_vocab: Optional[Dict[int, str]] = None
@@ -315,17 +298,14 @@ class Transformer(nn.Module):
         return self.decode(memory, src_mask, tgt, tgt_mask)
 
     def _ensure_vocab(self) -> None:
-        """Ensure vocabularies are loaded."""
         if self.src_vocab is not None and self.tgt_vocab is not None and self.inv_tgt_vocab is not None:
             return
 
-        # Try to load from dataset module
         try:
             from dataset import build_vocab_from_train
             self.src_vocab, self.tgt_vocab = build_vocab_from_train()
             self.inv_tgt_vocab = {v: k for k, v in self.tgt_vocab.items()}
         except Exception:
-            # Fallback to basic vocab
             if self.src_vocab is None:
                 self.src_vocab = {"<pad>": 0, "<sos>": 1, "<eos>": 2, "<unk>": 3}
             if self.tgt_vocab is None:
@@ -335,10 +315,6 @@ class Transformer(nn.Module):
 
     @torch.no_grad()
     def infer(self, src_sentence: str, max_len: int = 50) -> str:
-        """
-        Greedy decoding for a single German sentence.
-        Returns the generated English sentence.
-        """
         self.eval()
         self._ensure_vocab()
 
