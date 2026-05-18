@@ -1,7 +1,5 @@
 import os
-import math
 import random
-from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
 import torch
@@ -18,16 +16,10 @@ try:
 except Exception:
     evaluate = None
 
-import spacy
-
 from dataset import Multi30kDataset, collate_fn, build_vocab_from_train
 from lr_scheduler import NoamScheduler
 from model import Transformer, make_src_mask, make_tgt_mask
 
-
-# =========================
-# Config
-# =========================
 CONFIG = {
     "seed": 42,
     "project": "da6401-assignment-3",
@@ -59,9 +51,6 @@ UNK_IDX = 3
 os.makedirs(CONFIG["save_dir"], exist_ok=True)
 
 
-# =========================
-# Reproducibility
-# =========================
 def set_seed(seed: int) -> None:
     random.seed(seed)
     torch.manual_seed(seed)
@@ -70,34 +59,11 @@ def set_seed(seed: int) -> None:
     torch.backends.cudnn.benchmark = True
 
 
-# =========================
-# SpaCy tokenizers
-# =========================
-def load_spacy_models():
-    try:
-        spacy_de = spacy.load("de_core_news_sm")
-    except OSError:
-        spacy_de = spacy.blank("de")
-
-    try:
-        spacy_en = spacy.load("en_core_web_sm")
-    except OSError:
-        spacy_en = spacy.blank("en")
-
-    return spacy_de, spacy_en
-
-
-SPACY_DE, SPACY_EN = load_spacy_models()
-
-
-# =========================
-# Dataset helpers
-# =========================
-def build_dataloaders(batch_size: int) -> Tuple[DataLoader, DataLoader, DataLoader, Dict[str, int], Dict[str, int]]:
-    # Build vocabulary from train split
+def build_dataloaders(
+    batch_size: int,
+) -> Tuple[DataLoader, DataLoader, DataLoader, Dict[str, int], Dict[str, int]]:
     vocab_de, vocab_en = build_vocab_from_train()
-    
-    # Create datasets with shared vocabulary
+
     train_dataset = Multi30kDataset(split="train", vocab_de=vocab_de, vocab_en=vocab_en)
     val_dataset = Multi30kDataset(split="validation", vocab_de=vocab_de, vocab_en=vocab_en)
     test_dataset = Multi30kDataset(split="test", vocab_de=vocab_de, vocab_en=vocab_en)
@@ -147,9 +113,6 @@ def ids_to_sentence(ids: List[int], inv_vocab: Dict[int, str]) -> str:
     return " ".join(tokens)
 
 
-# =========================
-# Loss: Label smoothing
-# =========================
 class LabelSmoothingLoss(nn.Module):
     def __init__(self, vocab_size: int, pad_idx: int = PAD_IDX, smoothing: float = 0.1) -> None:
         super().__init__()
@@ -161,6 +124,10 @@ class LabelSmoothingLoss(nn.Module):
         self.criterion = nn.KLDivLoss(reduction="sum")
 
     def forward(self, logits: torch.Tensor, target: torch.Tensor) -> torch.Tensor:
+        """
+        logits: [batch, seq_len, vocab]
+        target: [batch, seq_len]
+        """
         log_probs = F.log_softmax(logits, dim=-1)
         log_probs = log_probs.view(-1, self.vocab_size)
         target = target.contiguous().view(-1)
@@ -180,9 +147,6 @@ class LabelSmoothingLoss(nn.Module):
         return loss / n_valid
 
 
-# =========================
-# Metrics
-# =========================
 def token_accuracy(logits: torch.Tensor, target: torch.Tensor, pad_idx: int = PAD_IDX) -> float:
     pred = logits.argmax(dim=-1)
     mask = target.ne(pad_idx)
@@ -198,13 +162,12 @@ def get_bleu_scorer():
 
             def _compute(predictions: List[str], references: List[List[str]]) -> float:
                 result = bleu_metric.compute(predictions=predictions, references=references)
-                return float(result["bleu"]) * 100  # Return as percentage
+                return float(result["bleu"]) * 100.0
 
             return _compute
         except Exception:
             pass
 
-    # Fallback
     def _compute(predictions: List[str], references: List[List[str]]) -> float:
         return 0.0
 
@@ -263,13 +226,13 @@ def evaluate_bleu(
         src_mask = make_src_mask(src, pad_idx=PAD_IDX).to(device)
 
         for i in range(src.size(0)):
-            single_src = src[i:i + 1]
-            single_mask = src_mask[i:i + 1]
+            single_src = src[i : i + 1]
+            single_mask = src_mask[i : i + 1]
 
             pred_ids = greedy_decode(
-                model,
-                single_src,
-                single_mask,
+                model=model,
+                src=single_src,
+                src_mask=single_mask,
                 max_len=max_len,
                 start_symbol=SOS_IDX,
                 end_symbol=EOS_IDX,
@@ -285,15 +248,12 @@ def evaluate_bleu(
     return BLEU_SCORE(predictions, references)
 
 
-# =========================
-# Training / validation epoch
-# =========================
 def run_epoch(
     model: Transformer,
     loader: DataLoader,
     criterion: nn.Module,
     optimizer: Optional[torch.optim.Optimizer],
-    scheduler: Optional[torch.optim.lr_scheduler._LRScheduler],
+    scheduler: Optional[object],
     device: torch.device,
     train: bool,
     epoch: int,
@@ -339,14 +299,9 @@ def run_epoch(
         current_lr = optimizer.param_groups[0]["lr"] if optimizer is not None else 0.0
         pbar.set_postfix(loss=f"{loss.item():.4f}", acc=f"{acc:.4f}", lr=f"{current_lr:.6e}")
 
-    avg_loss = total_loss / max(num_batches, 1)
-    avg_acc = total_acc / max(num_batches, 1)
-    return avg_loss, avg_acc
+    return total_loss / max(num_batches, 1), total_acc / max(num_batches, 1)
 
 
-# =========================
-# Checkpointing
-# =========================
 def save_checkpoint(
     path: str,
     model: Transformer,
@@ -375,7 +330,7 @@ def save_checkpoint(
             "num_heads": config["num_heads"],
             "d_ff": config["d_ff"],
             "dropout": config["dropout"],
-        }
+        },
     }
     torch.save(ckpt, path)
 
@@ -388,75 +343,69 @@ def load_checkpoint(
 ) -> Dict:
     ckpt = torch.load(path, map_location="cpu")
     model.load_state_dict(ckpt["model_state_dict"])
-    
-    # Set vocabularies on model
+
     model.src_vocab = ckpt.get("vocab_de")
     model.tgt_vocab = ckpt.get("vocab_en")
     if ckpt.get("vocab_en") is not None:
         model.inv_tgt_vocab = {v: k for k, v in ckpt["vocab_en"].items()}
-    
+
     if optimizer is not None and "optimizer_state_dict" in ckpt:
         optimizer.load_state_dict(ckpt["optimizer_state_dict"])
     if scheduler is not None and ckpt.get("scheduler_state_dict") is not None:
         scheduler.load_state_dict(ckpt["scheduler_state_dict"])
-    
+
     return ckpt
 
 
-# =========================
-# Visualization
-# =========================
 def plot_history(history: Dict[str, List[float]], save_path: str = "training_curves.png") -> None:
     epochs = range(1, len(history["train_loss"]) + 1)
 
-    fig, axes = plt.subplots(1, 3, figsize=(18, 5))
-    
-    axes[0].plot(epochs, history["train_loss"], label="Train Loss")
-    axes[0].plot(epochs, history["val_loss"], label="Val Loss")
-    axes[0].set_xlabel("Epoch")
-    axes[0].set_ylabel("Loss")
-    axes[0].set_title("Training and Validation Loss")
-    axes[0].legend()
-    axes[0].grid(True, alpha=0.3)
-
-    axes[1].plot(epochs, history["train_acc"], label="Train Accuracy")
-    axes[1].plot(epochs, history["val_acc"], label="Val Accuracy")
-    axes[1].set_xlabel("Epoch")
-    axes[1].set_ylabel("Token Accuracy")
-    axes[1].set_title("Training and Validation Accuracy")
-    axes[1].legend()
-    axes[1].grid(True, alpha=0.3)
-
-    axes[2].plot(epochs, history["val_bleu"], label="Val BLEU", color='green')
-    axes[2].set_xlabel("Epoch")
-    axes[2].set_ylabel("BLEU Score")
-    axes[2].set_title("Validation BLEU")
-    axes[2].legend()
-    axes[2].grid(True, alpha=0.3)
-    
+    plt.figure(figsize=(10, 4))
+    plt.plot(epochs, history["train_loss"], label="Train Loss")
+    plt.plot(epochs, history["val_loss"], label="Val Loss")
+    plt.xlabel("Epoch")
+    plt.ylabel("Loss")
+    plt.title("Training and Validation Loss")
+    plt.legend()
     plt.tight_layout()
-    plt.savefig(save_path, dpi=200, bbox_inches='tight')
+    plt.savefig(save_path, dpi=200)
+    plt.close()
+
+    plt.figure(figsize=(10, 4))
+    plt.plot(epochs, history["train_acc"], label="Train Accuracy")
+    plt.plot(epochs, history["val_acc"], label="Val Accuracy")
+    plt.xlabel("Epoch")
+    plt.ylabel("Token Accuracy")
+    plt.title("Training and Validation Accuracy")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig("accuracy_curves.png", dpi=200)
+    plt.close()
+
+    plt.figure(figsize=(10, 4))
+    plt.plot(epochs, history["val_bleu"], label="Val BLEU")
+    plt.xlabel("Epoch")
+    plt.ylabel("BLEU")
+    plt.title("Validation BLEU")
+    plt.legend()
+    plt.tight_layout()
+    plt.savefig("bleu_curve.png", dpi=200)
     plt.close()
 
 
-# =========================
-# Main training script
-# =========================
 def main() -> None:
     set_seed(CONFIG["seed"])
-
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    # Initialize wandb (will be disabled in autograder environment)
     try:
         wandb.init(
             project=CONFIG["project"],
             name=CONFIG["run_name"],
             config=CONFIG,
-            mode=os.environ.get("WANDB_MODE", "disabled"),  # Changed to disabled by default
+            mode=os.environ.get("WANDB_MODE", "disabled"),
         )
-    except:
+    except Exception:
         pass
 
     train_loader, val_loader, test_loader, vocab_de, vocab_en = build_dataloaders(CONFIG["batch_size"])
@@ -472,15 +421,14 @@ def main() -> None:
         d_ff=CONFIG["d_ff"],
         dropout=CONFIG["dropout"],
     ).to(device)
-    
-    # Store vocabularies on model
+
     model.src_vocab = vocab_de
     model.tgt_vocab = vocab_en
     model.inv_tgt_vocab = build_inverse_vocab(vocab_en)
 
     optimizer = torch.optim.Adam(
         model.parameters(),
-        lr=CONFIG["fixed_lr"] if not CONFIG["use_noam"] else 0.0,
+        lr=1.0 if CONFIG["use_noam"] else CONFIG["fixed_lr"],
         betas=(0.9, 0.98),
         eps=1e-9,
     )
@@ -492,6 +440,7 @@ def main() -> None:
             d_model=CONFIG["d_model"],
             warmup_steps=CONFIG["warmup_steps"],
         )
+        scheduler.step()  # prime step 1 before the first optimizer update
 
     criterion = LabelSmoothingLoss(
         vocab_size=tgt_vocab_size,
@@ -539,17 +488,13 @@ def main() -> None:
             epoch=epoch,
         )
 
-        # Calculate BLEU every 2 epochs for speed, but always on last few epochs
-        if epoch % 2 == 0 or epoch >= CONFIG["epochs"] - 3:
-            val_bleu = evaluate_bleu(
-                model=model,
-                data_loader=val_loader,
-                tgt_vocab=vocab_en,
-                device=device,
-                max_len=CONFIG["max_decode_len"],
-            )
-        else:
-            val_bleu = 0.0  # Skip BLEU calculation for speed
+        val_bleu = evaluate_bleu(
+            model=model,
+            data_loader=val_loader,
+            tgt_vocab=vocab_en,
+            device=device,
+            max_len=CONFIG["max_decode_len"],
+        )
 
         current_lr = optimizer.param_groups[0]["lr"]
 
@@ -561,16 +506,18 @@ def main() -> None:
         history["lr"].append(current_lr)
 
         try:
-            wandb.log({
-                "epoch": epoch,
-                "train_loss": train_loss,
-                "val_loss": val_loss,
-                "train_acc": train_acc,
-                "val_acc": val_acc,
-                "val_bleu": val_bleu,
-                "lr": current_lr,
-            })
-        except:
+            wandb.log(
+                {
+                    "epoch": epoch,
+                    "train_loss": train_loss,
+                    "val_loss": val_loss,
+                    "train_acc": train_acc,
+                    "val_acc": val_acc,
+                    "val_bleu": val_bleu,
+                    "lr": current_lr,
+                }
+            )
+        except Exception:
             pass
 
         print(
@@ -580,8 +527,7 @@ def main() -> None:
             f"val_bleu={val_bleu:.2f} | lr={current_lr:.6e}"
         )
 
-        # Save best by BLEU
-        if val_bleu > best_val_bleu and val_bleu > 0:
+        if val_bleu > best_val_bleu:
             best_val_bleu = val_bleu
             save_checkpoint(
                 path=best_path,
@@ -594,9 +540,8 @@ def main() -> None:
                 vocab_en=vocab_en,
                 config=CONFIG,
             )
-            print(f"  → Saved new best model with BLEU {best_val_bleu:.2f}")
+            print(f"  -> Saved new best model with BLEU {best_val_bleu:.2f}")
 
-        # Always save last checkpoint
         save_checkpoint(
             path=last_path,
             model=model,
@@ -609,7 +554,6 @@ def main() -> None:
             config=CONFIG,
         )
 
-        # Sample translation
         if epoch % 5 == 0:
             sample_src, sample_tgt = next(iter(val_loader))
             sample_sentence = ids_to_sentence(sample_src[0].tolist(), build_inverse_vocab(vocab_de))
@@ -632,7 +576,6 @@ def main() -> None:
 
     plot_history(history)
 
-    # Load best checkpoint for test evaluation
     print("\nLoading best checkpoint for test evaluation...")
     best_ckpt = load_checkpoint(best_path, model, optimizer=None, scheduler=None)
     print(f"Loaded best model from epoch {best_ckpt['epoch']}")
@@ -644,14 +587,14 @@ def main() -> None:
         device=device,
         max_len=CONFIG["max_decode_len"],
     )
-    print(f"\n{'='*60}")
+    print("\n" + "=" * 60)
     print(f"FINAL TEST BLEU: {test_bleu:.2f}")
-    print(f"{'='*60}")
-    
+    print("=" * 60)
+
     try:
         wandb.log({"test_bleu": test_bleu})
         wandb.finish()
-    except:
+    except Exception:
         pass
 
 
