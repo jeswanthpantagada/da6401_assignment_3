@@ -16,10 +16,6 @@ UNK_IDX = 3
 
 
 def load_spacy_model(lang: str):
-    """
-    Tries to load a spaCy model. If it is not available, falls back to a blank
-    tokenizer for that language.
-    """
     try:
         if lang == "de":
             return spacy.load("de_core_news_sm")
@@ -27,7 +23,7 @@ def load_spacy_model(lang: str):
             return spacy.load("en_core_web_sm")
         else:
             return spacy.blank(lang)
-    except OSError:
+    except Exception:
         return spacy.blank(lang)
 
 
@@ -45,7 +41,7 @@ def tokenize_en(text: str):
 
 def build_vocab_from_train():
     """
-    Builds German and English vocabularies from the training split only.
+    Builds vocabularies from the training split only.
     Special tokens:
         <pad> -> 0
         <sos> -> 1
