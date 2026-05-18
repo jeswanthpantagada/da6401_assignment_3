@@ -15,72 +15,6 @@ EOS_IDX = 2
 UNK_IDX = 3
 
 
-def _infer_dims_from_checkpoint():
-    """
-    Tries to infer model dimensions from a checkpoint in the current directory.
-    This helps the autograder instantiate Transformer() with no arguments.
-    """
-    ckpt_files = glob.glob("*.pt") + glob.glob("*.pth")
-    if not ckpt_files:
-        return None
-
-    ckpt_path = max(ckpt_files, key=os.path.getmtime)
-    try:
-        ckpt = torch.load(ckpt_path, map_location="cpu")
-    except Exception:
-        return None
-
-    if isinstance(ckpt, dict):
-        if "model_config" in ckpt and isinstance(ckpt["model_config"], dict):
-            cfg = ckpt["model_config"]
-            return {
-                "src_vocab_size": cfg.get("src_vocab_size"),
-                "tgt_vocab_size": cfg.get("tgt_vocab_size"),
-                "d_model": cfg.get("d_model"),
-                "N": cfg.get("N"),
-                "num_heads": cfg.get("num_heads"),
-                "d_ff": cfg.get("d_ff"),
-                "dropout": cfg.get("dropout"),
-            }
-
-        state = ckpt.get("model_state_dict", ckpt)
-        if isinstance(state, dict):
-            try:
-                src_vocab_size = state["src_emb.weight"].shape[0]
-                tgt_vocab_size = state["tgt_emb.weight"].shape[0]
-                d_model = state["src_emb.weight"].shape[1]
-                d_ff = state["encoder.layers.0.ffn.linear1.weight"].shape[0]
-
-                num_heads = None
-                for k, v in state.items():
-                    if k.endswith("self_attn.W_q.weight"):
-                        d_model = v.shape[0]
-                        break
-
-                N = len(
-                    {
-                        key.split(".")[2]
-                        for key in state.keys()
-                        if key.startswith("encoder.layers.")
-                    }
-                )
-
-                dropout = 0.1
-                return {
-                    "src_vocab_size": src_vocab_size,
-                    "tgt_vocab_size": tgt_vocab_size,
-                    "d_model": d_model,
-                    "N": N if N > 0 else None,
-                    "num_heads": num_heads,
-                    "d_ff": d_ff,
-                    "dropout": dropout,
-                }
-            except Exception:
-                return None
-
-    return None
-
-
 def scaled_dot_product_attention(
     Q: torch.Tensor,
     K: torch.Tensor,
@@ -312,38 +246,22 @@ class Decoder(nn.Module):
 class Transformer(nn.Module):
     def __init__(
         self,
-        src_vocab_size: Optional[int] = None,
-        tgt_vocab_size: Optional[int] = None,
-        d_model: int = 512,
-        N: int = 6,
+        src_vocab_size: int,
+        tgt_vocab_size: int,
+        d_model: int = 256,
+        N: int = 4,
         num_heads: int = 8,
-        d_ff: int = 2048,
+        d_ff: int = 1024,
         dropout: float = 0.1,
     ) -> None:
         super().__init__()
 
-        inferred = None
-        if src_vocab_size is None or tgt_vocab_size is None:
-            inferred = _infer_dims_from_checkpoint()
-
-        if src_vocab_size is None:
-            src_vocab_size = inferred.get("src_vocab_size") if inferred and inferred.get("src_vocab_size") else 10000
-        if tgt_vocab_size is None:
-            tgt_vocab_size = inferred.get("tgt_vocab_size") if inferred and inferred.get("tgt_vocab_size") else 10000
-
-        if inferred is not None:
-            if inferred.get("d_model") is not None:
-                d_model = inferred["d_model"]
-            if inferred.get("N") is not None:
-                N = inferred["N"]
-            if inferred.get("num_heads") is not None:
-                num_heads = inferred["num_heads"]
-            if inferred.get("d_ff") is not None:
-                d_ff = inferred["d_ff"]
-            if inferred.get("dropout") is not None:
-                dropout = inferred["dropout"]
-
         self.d_model = d_model
+        self.N = N
+        self.num_heads = num_heads
+        self.d_ff = d_ff
+        self.src_vocab_size = src_vocab_size
+        self.tgt_vocab_size = tgt_vocab_size
 
         self.src_emb = nn.Embedding(src_vocab_size, d_model)
         self.tgt_emb = nn.Embedding(tgt_vocab_size, d_model)
@@ -357,6 +275,7 @@ class Transformer(nn.Module):
 
         self.fc_out = nn.Linear(d_model, tgt_vocab_size)
 
+        # Store vocabularies for inference
         self.src_vocab: Optional[Dict[str, int]] = None
         self.tgt_vocab: Optional[Dict[str, int]] = None
         self.inv_tgt_vocab: Optional[Dict[int, str]] = None
@@ -396,14 +315,17 @@ class Transformer(nn.Module):
         return self.decode(memory, src_mask, tgt, tgt_mask)
 
     def _ensure_vocab(self) -> None:
+        """Ensure vocabularies are loaded."""
         if self.src_vocab is not None and self.tgt_vocab is not None and self.inv_tgt_vocab is not None:
             return
 
+        # Try to load from dataset module
         try:
             from dataset import build_vocab_from_train
             self.src_vocab, self.tgt_vocab = build_vocab_from_train()
             self.inv_tgt_vocab = {v: k for k, v in self.tgt_vocab.items()}
         except Exception:
+            # Fallback to basic vocab
             if self.src_vocab is None:
                 self.src_vocab = {"<pad>": 0, "<sos>": 1, "<eos>": 2, "<unk>": 3}
             if self.tgt_vocab is None:
@@ -425,9 +347,12 @@ class Transformer(nn.Module):
         try:
             spacy_de = spacy.load("de_core_news_sm")
         except OSError:
-            import spacy.cli
-            spacy.cli.download("de_core_news_sm")
-            spacy_de = spacy.load("de_core_news_sm")
+            try:
+                import spacy.cli
+                spacy.cli.download("de_core_news_sm")
+                spacy_de = spacy.load("de_core_news_sm")
+            except:
+                spacy_de = spacy.blank("de")
 
         device = next(self.parameters()).device
         tokens = [tok.text for tok in spacy_de.tokenizer(src_sentence)]
