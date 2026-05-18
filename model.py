@@ -186,8 +186,8 @@ class Decoder(nn.Module):
 class Transformer(nn.Module):
     def __init__(
         self,
-        src_vocab_size: int,
-        tgt_vocab_size: int,
+        src_vocab_size: int = None,
+        tgt_vocab_size: int = None,
         d_model:   int   = 512,
         N:         int   = 6,
         num_heads: int   = 8,
@@ -196,6 +196,23 @@ class Transformer(nn.Module):
         checkpoint_path: str = None,
     ) -> None:
         super().__init__()
+        
+        if src_vocab_size is None or tgt_vocab_size is None:
+            import glob
+            ckpt_files = glob.glob("*.pt")
+            if ckpt_files:
+                ckpt = torch.load(ckpt_files[-1], map_location='cpu')
+                if 'model_config' in ckpt:
+                    src_vocab_size = ckpt['model_config'].get('src_vocab_size', 10000)
+                    tgt_vocab_size = ckpt['model_config'].get('tgt_vocab_size', 10000)
+                    d_model = ckpt['model_config'].get('d_model', 512)
+                    N = ckpt['model_config'].get('N', 6)
+                    num_heads = ckpt['model_config'].get('num_heads', 8)
+                    d_ff = ckpt['model_config'].get('d_ff', 2048)
+            else:
+                src_vocab_size = 10000
+                tgt_vocab_size = 10000
+
         self.src_emb = nn.Embedding(src_vocab_size, d_model)
         self.tgt_emb = nn.Embedding(tgt_vocab_size, d_model)
         self.pos_enc = PositionalEncoding(d_model, dropout)
@@ -210,9 +227,14 @@ class Transformer(nn.Module):
 
         if checkpoint_path is not None:
             if not os.path.exists(checkpoint_path):
+                import gdown
                 gdown.download(id="1A_dummy_ID_placeholder", output=checkpoint_path, quiet=False)
-            self.load_state_dict(torch.load(checkpoint_path))
-
+            
+            checkpoint = torch.load(checkpoint_path, map_location='cpu')
+            if 'model_state_dict' in checkpoint:
+                self.load_state_dict(checkpoint['model_state_dict'])
+            else:
+                self.load_state_dict(checkpoint)
     def encode(
         self,
         src:      torch.Tensor,
