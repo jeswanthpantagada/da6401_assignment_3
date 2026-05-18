@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
+from lr_scheduler import NoamScheduler
 from typing import Optional
 import wandb
 from tqdm import tqdm
@@ -178,25 +179,6 @@ def load_checkpoint(
         scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
         
     return checkpoint['epoch']
-
-class NoamScheduler:
-    def __init__(self, optimizer, d_model, warmup_steps):
-        self.optimizer = optimizer
-        self.d_model = d_model
-        self.warmup_steps = warmup_steps
-        self.step_num = 0
-
-    def step(self):
-        self.step_num += 1
-        lr = (self.d_model ** -0.5) * min(self.step_num ** -0.5, self.step_num * (self.warmup_steps ** -1.5))
-        for param_group in self.optimizer.param_groups:
-            param_group['lr'] = lr
-            
-    def state_dict(self):
-        return {'step_num': self.step_num}
-        
-    def load_state_dict(self, state_dict):
-        self.step_num = state_dict['step_num']
 
 def run_training_experiment() -> None:
     wandb.init(project="da6401-a3", config={
