@@ -1,9 +1,7 @@
-import math
-from typing import List, Optional
-
 import torch
 import torch.optim as optim
 import matplotlib.pyplot as plt
+from typing import List
 
 
 class NoamScheduler:
@@ -11,9 +9,6 @@ class NoamScheduler:
     Noam learning-rate schedule from the Transformer paper.
 
     lrate = d_model^(-0.5) * min(step^(-0.5), step * warmup_steps^(-1.5))
-
-    This implementation is intentionally simple and explicit so it behaves
-    predictably in both training and grading.
     """
 
     def __init__(
@@ -79,9 +74,7 @@ def get_lr_history(
 
     history = []
     for _ in range(total_steps):
-        lr = scheduler.step()
-        history.append(lr)
-
+        history.append(scheduler.step())
     return history
 
 
