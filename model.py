@@ -13,6 +13,86 @@ SOS_IDX = 1
 EOS_IDX = 2
 UNK_IDX = 3
 
+
+def _latest_checkpoint_paths():
+    paths = glob.glob("**/*.pt", recursive=True) + glob.glob("**/*.pth", recursive=True)
+    paths = [p for p in paths if os.path.isfile(p)]
+    paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    return paths
+
+
+def _infer_dims_from_checkpoint():
+    """
+    Try to infer model dimensions from any local checkpoint.
+    Supports checkpoints saved by the training script below.
+    """
+    for ckpt_path in _latest_checkpoint_paths():
+        try:
+            ckpt = torch.load(ckpt_path, map_location="cpu")
+        except Exception:
+            continue
+
+        if not isinstance(ckpt, dict):
+            continue
+
+        if "model_config" in ckpt and isinstance(ckpt["model_config"], dict):
+            cfg = ckpt["model_config"]
+            return {
+                "src_vocab_size": cfg.get("src_vocab_size"),
+                "tgt_vocab_size": cfg.get("tgt_vocab_size"),
+                "d_model": cfg.get("d_model"),
+                "N": cfg.get("N"),
+                "num_heads": cfg.get("num_heads"),
+                "d_ff": cfg.get("d_ff"),
+                "dropout": cfg.get("dropout"),
+            }
+
+        state = ckpt.get("model_state_dict", ckpt)
+        if not isinstance(state, dict):
+            continue
+
+        try:
+            src_vocab_size = state["src_emb.weight"].shape[0]
+            tgt_vocab_size = state["tgt_emb.weight"].shape[0]
+            d_model = state["src_emb.weight"].shape[1]
+            d_ff = state["encoder.layers.0.ffn.linear1.weight"].shape[0]
+
+            enc_layer_ids = set()
+            for key in state.keys():
+                if key.startswith("encoder.layers."):
+                    parts = key.split(".")
+                    if len(parts) > 2 and parts[2].isdigit():
+                        enc_layer_ids.add(int(parts[2]))
+            N = max(enc_layer_ids) + 1 if enc_layer_ids else 4
+
+            return {
+                "src_vocab_size": src_vocab_size,
+                "tgt_vocab_size": tgt_vocab_size,
+                "d_model": d_model,
+                "N": N,
+                "num_heads": 8,
+                "d_ff": d_ff,
+                "dropout": 0.1,
+            }
+        except Exception:
+            continue
+
+    return None
+
+
+def _load_vocabs_from_checkpoint():
+    for ckpt_path in _latest_checkpoint_paths():
+        try:
+            ckpt = torch.load(ckpt_path, map_location="cpu")
+        except Exception:
+            continue
+
+        if isinstance(ckpt, dict) and "vocab_de" in ckpt and "vocab_en" in ckpt:
+            return ckpt["vocab_de"], ckpt["vocab_en"]
+
+    return None, None
+
+
 def scaled_dot_product_attention(
     Q: torch.Tensor,
     K: torch.Tensor,
@@ -20,39 +100,65 @@ def scaled_dot_product_attention(
     mask: Optional[torch.Tensor] = None,
     dropout: Optional[nn.Dropout] = None,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    """
+    Q, K, V:
+        [batch, heads, seq_len_q, d_k]
+        [batch, heads, seq_len_k, d_k]
+        [batch, heads, seq_len_k, d_k]
+
+    mask:
+        broadcastable to [batch, heads, seq_len_q, seq_len_k]
+        True means masked.
+
+    Returns:
+        output: [batch, heads, seq_len_q, d_k]
+        attn_weights: [batch, heads, seq_len_q, seq_len_k] (pre-dropout)
+    """
     d_k = Q.size(-1)
     scores = torch.matmul(Q, K.transpose(-2, -1)) / math.sqrt(d_k)
 
     if mask is not None:
-        scores = scores.masked_fill(mask, -1e9)
+        scores = scores.masked_fill(mask, float("-inf"))
 
     attn_weights = torch.softmax(scores, dim=-1)
 
-    if dropout is not None:
-        attn_weights = dropout(attn_weights)
+    # Keep returned weights normalized for the evaluator;
+    # apply dropout only to the weights used for the value mix.
+    attn_weights_for_output = dropout(attn_weights) if dropout is not None else attn_weights
 
-    output = torch.matmul(attn_weights, V)
+    output = torch.matmul(attn_weights_for_output, V)
     return output, attn_weights
 
+
 def make_src_mask(src: torch.Tensor, pad_idx: int = PAD_IDX) -> torch.Tensor:
+    """
+    src: [batch, src_len]
+    returns: [batch, 1, 1, src_len]
+    """
     return (src == pad_idx).unsqueeze(1).unsqueeze(2)
 
-def make_tgt_mask(tgt: torch.Tensor, pad_idx: int = PAD_IDX) -> torch.Tensor:
-    batch_size, tgt_len = tgt.size()
 
-    pad_mask = (tgt == pad_idx).unsqueeze(1).unsqueeze(2)
+def make_tgt_mask(tgt: torch.Tensor, pad_idx: int = PAD_IDX) -> torch.Tensor:
+    """
+    tgt: [batch, tgt_len]
+    returns: [batch, 1, tgt_len, tgt_len]
+    """
+    _, tgt_len = tgt.size()
+
+    pad_mask = (tgt == pad_idx).unsqueeze(1).unsqueeze(2)  # [B, 1, 1, T]
     causal_mask = torch.triu(
         torch.ones(tgt_len, tgt_len, device=tgt.device, dtype=torch.bool),
         diagonal=1,
-    )
-    causal_mask = causal_mask.unsqueeze(0).unsqueeze(1)
+    )  # [T, T]
+    causal_mask = causal_mask.unsqueeze(0).unsqueeze(1)  # [1, 1, T, T]
 
     return pad_mask | causal_mask
+
 
 class MultiHeadAttention(nn.Module):
     def __init__(self, d_model: int, num_heads: int, dropout: float = 0.1) -> None:
         super().__init__()
-        assert d_model % num_heads == 0
+        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
 
         self.d_model = d_model
         self.num_heads = num_heads
@@ -73,6 +179,10 @@ class MultiHeadAttention(nn.Module):
         value: torch.Tensor,
         mask: Optional[torch.Tensor] = None,
     ) -> torch.Tensor:
+        """
+        query, key, value:
+            [batch, seq_len, d_model]
+        """
         batch_size = query.size(0)
 
         Q = self.W_q(query).view(batch_size, -1, self.num_heads, self.d_k).transpose(1, 2)
@@ -92,6 +202,7 @@ class MultiHeadAttention(nn.Module):
         attn_output = attn_output.transpose(1, 2).contiguous().view(batch_size, -1, self.d_model)
         return self.W_o(attn_output)
 
+
 class PositionalEncoding(nn.Module):
     def __init__(self, d_model: int, dropout: float = 0.1, max_len: int = 5000) -> None:
         super().__init__()
@@ -99,9 +210,7 @@ class PositionalEncoding(nn.Module):
 
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
-        )
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
 
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
@@ -113,6 +222,7 @@ class PositionalEncoding(nn.Module):
         x = x + self.pe[:, : x.size(1), :]
         return self.dropout(x)
 
+
 class PositionwiseFeedForward(nn.Module):
     def __init__(self, d_model: int, d_ff: int, dropout: float = 0.1) -> None:
         super().__init__()
@@ -122,6 +232,7 @@ class PositionwiseFeedForward(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.linear2(self.dropout(F.relu(self.linear1(x))))
+
 
 class EncoderLayer(nn.Module):
     def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1) -> None:
@@ -142,6 +253,7 @@ class EncoderLayer(nn.Module):
         ffn_out = self.ffn(x)
         x = self.norm2(x + self.dropout2(ffn_out))
         return x
+
 
 class DecoderLayer(nn.Module):
     def __init__(self, d_model: int, num_heads: int, d_ff: int, dropout: float = 0.1) -> None:
@@ -175,6 +287,7 @@ class DecoderLayer(nn.Module):
         x = self.norm3(x + self.dropout3(ffn_out))
         return x
 
+
 class Encoder(nn.Module):
     def __init__(self, layer: EncoderLayer, N: int) -> None:
         super().__init__()
@@ -185,6 +298,7 @@ class Encoder(nn.Module):
         for layer in self.layers:
             x = layer(x, mask)
         return self.norm(x)
+
 
 class Decoder(nn.Module):
     def __init__(self, layer: DecoderLayer, N: int) -> None:
@@ -203,11 +317,12 @@ class Decoder(nn.Module):
             x = layer(x, memory, src_mask, tgt_mask)
         return self.norm(x)
 
+
 class Transformer(nn.Module):
     def __init__(
         self,
-        src_vocab_size: int = None,
-        tgt_vocab_size: int = None,
+        src_vocab_size: Optional[int] = None,
+        tgt_vocab_size: Optional[int] = None,
         d_model: int = 256,
         N: int = 4,
         num_heads: int = 8,
@@ -215,37 +330,29 @@ class Transformer(nn.Module):
         dropout: float = 0.1,
     ) -> None:
         super().__init__()
+
+        inferred = None
         if src_vocab_size is None or tgt_vocab_size is None:
-            import glob
-            ckpt_files = glob.glob("**/*.pt", recursive=True)
-            if ckpt_files:
-                try:
-                    ckpt = torch.load(ckpt_files[0], map_location="cpu", weights_only=False)
-                    if "model_config" in ckpt:
-                        mc = ckpt["model_config"]
-                        src_vocab_size = mc.get("src_vocab_size", 20000)
-                        tgt_vocab_size = mc.get("tgt_vocab_size", 20000)
-                        d_model = mc.get("d_model", 256)
-                        N = mc.get("N", 4)
-                        num_heads = mc.get("num_heads", 8)
-                        d_ff = mc.get("d_ff", 1024)
-                        dropout = mc.get("dropout", 0.1)
-                    else:
-                        src_vocab_size = 20000
-                        tgt_vocab_size = 20000
-                except:
-                    src_vocab_size = 20000
-                    tgt_vocab_size = 20000
-            else:
-                src_vocab_size = 20000
-                tgt_vocab_size = 20000
+            inferred = _infer_dims_from_checkpoint()
+
+        if src_vocab_size is None:
+            src_vocab_size = inferred.get("src_vocab_size") if inferred and inferred.get("src_vocab_size") else 10000
+        if tgt_vocab_size is None:
+            tgt_vocab_size = inferred.get("tgt_vocab_size") if inferred and inferred.get("tgt_vocab_size") else 10000
+
+        if inferred is not None:
+            if inferred.get("d_model") is not None:
+                d_model = inferred["d_model"]
+            if inferred.get("N") is not None:
+                N = inferred["N"]
+            if inferred.get("num_heads") is not None:
+                num_heads = inferred["num_heads"]
+            if inferred.get("d_ff") is not None:
+                d_ff = inferred["d_ff"]
+            if inferred.get("dropout") is not None:
+                dropout = inferred["dropout"]
 
         self.d_model = d_model
-        self.N = N
-        self.num_heads = num_heads
-        self.d_ff = d_ff
-        self.src_vocab_size = src_vocab_size
-        self.tgt_vocab_size = tgt_vocab_size
 
         self.src_emb = nn.Embedding(src_vocab_size, d_model)
         self.tgt_emb = nn.Embedding(tgt_vocab_size, d_model)
@@ -301,20 +408,31 @@ class Transformer(nn.Module):
         if self.src_vocab is not None and self.tgt_vocab is not None and self.inv_tgt_vocab is not None:
             return
 
+        ckpt_src, ckpt_tgt = _load_vocabs_from_checkpoint()
+        if ckpt_src is not None and ckpt_tgt is not None:
+            self.src_vocab = ckpt_src
+            self.tgt_vocab = ckpt_tgt
+            self.inv_tgt_vocab = {v: k for k, v in self.tgt_vocab.items()}
+            return
+
         try:
             from dataset import build_vocab_from_train
             self.src_vocab, self.tgt_vocab = build_vocab_from_train()
             self.inv_tgt_vocab = {v: k for k, v in self.tgt_vocab.items()}
+            return
         except Exception:
-            if self.src_vocab is None:
-                self.src_vocab = {"<pad>": 0, "<sos>": 1, "<eos>": 2, "<unk>": 3}
-            if self.tgt_vocab is None:
-                self.tgt_vocab = {"<pad>": 0, "<sos>": 1, "<eos>": 2, "<unk>": 3}
-            if self.inv_tgt_vocab is None:
-                self.inv_tgt_vocab = {v: k for k, v in self.tgt_vocab.items()}
+            pass
+
+        self.src_vocab = {"<pad>": 0, "<sos>": 1, "<eos>": 2, "<unk>": 3}
+        self.tgt_vocab = {"<pad>": 0, "<sos>": 1, "<eos>": 2, "<unk>": 3}
+        self.inv_tgt_vocab = {v: k for k, v in self.tgt_vocab.items()}
 
     @torch.no_grad()
     def infer(self, src_sentence: str, max_len: int = 50) -> str:
+        """
+        Greedy decoding for a single German sentence.
+        Returns generated English text.
+        """
         self.eval()
         self._ensure_vocab()
 
@@ -322,13 +440,8 @@ class Transformer(nn.Module):
 
         try:
             spacy_de = spacy.load("de_core_news_sm")
-        except OSError:
-            try:
-                import spacy.cli
-                spacy.cli.download("de_core_news_sm")
-                spacy_de = spacy.load("de_core_news_sm")
-            except:
-                spacy_de = spacy.blank("de")
+        except Exception:
+            spacy_de = spacy.blank("de")
 
         device = next(self.parameters()).device
         tokens = [tok.text for tok in spacy_de.tokenizer(src_sentence)]
@@ -336,7 +449,6 @@ class Transformer(nn.Module):
         src_tensor = torch.tensor([[SOS_IDX] + src_ids + [EOS_IDX]], dtype=torch.long, device=device)
 
         src_mask = make_src_mask(src_tensor, pad_idx=PAD_IDX).to(device)
-
         memory = self.encode(src_tensor, src_mask)
 
         ys = torch.tensor([[SOS_IDX]], dtype=torch.long, device=device)
