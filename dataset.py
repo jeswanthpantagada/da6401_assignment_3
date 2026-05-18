@@ -1,41 +1,114 @@
 import torch
 from torch.utils.data import Dataset
+from torch.nn.utils.rnn import pad_sequence
 from datasets import load_dataset
 import spacy
-from torch.nn.utils.rnn import pad_sequence
 
-spacy_de = spacy.load('de_core_news_sm')
-spacy_en = spacy.load('en_core_web_sm')
+PAD_TOKEN = "<pad>"
+SOS_TOKEN = "<sos>"
+EOS_TOKEN = "<eos>"
+UNK_TOKEN = "<unk>"
+
+PAD_IDX = 0
+SOS_IDX = 1
+EOS_IDX = 2
+UNK_IDX = 3
+
+
+def load_spacy_model(lang: str):
+    """
+    Tries to load a spaCy model. If it is not available, falls back to a blank
+    tokenizer for that language.
+    """
+    try:
+        if lang == "de":
+            return spacy.load("de_core_news_sm")
+        elif lang == "en":
+            return spacy.load("en_core_web_sm")
+        else:
+            return spacy.blank(lang)
+    except OSError:
+        return spacy.blank(lang)
+
+
+spacy_de = load_spacy_model("de")
+spacy_en = load_spacy_model("en")
+
+
+def tokenize_de(text: str):
+    return [tok.text for tok in spacy_de.tokenizer(text)]
+
+
+def tokenize_en(text: str):
+    return [tok.text for tok in spacy_en.tokenizer(text)]
+
+
+def build_vocab_from_train():
+    """
+    Builds German and English vocabularies from the training split only.
+    Special tokens:
+        <pad> -> 0
+        <sos> -> 1
+        <eos> -> 2
+        <unk> -> 3
+    """
+    train_data = load_dataset("bentrevett/multi30k", split="train")
+
+    vocab_de = {
+        PAD_TOKEN: PAD_IDX,
+        SOS_TOKEN: SOS_IDX,
+        EOS_TOKEN: EOS_IDX,
+        UNK_TOKEN: UNK_IDX,
+    }
+    vocab_en = {
+        PAD_TOKEN: PAD_IDX,
+        SOS_TOKEN: SOS_IDX,
+        EOS_TOKEN: EOS_IDX,
+        UNK_TOKEN: UNK_IDX,
+    }
+
+    for item in train_data:
+        for tok in tokenize_de(item["de"]):
+            if tok not in vocab_de:
+                vocab_de[tok] = len(vocab_de)
+
+        for tok in tokenize_en(item["en"]):
+            if tok not in vocab_en:
+                vocab_en[tok] = len(vocab_en)
+
+    return vocab_de, vocab_en
+
 
 class Multi30kDataset(Dataset):
-    def __init__(self, split='train'):
+    def __init__(self, split="train", vocab_de=None, vocab_en=None):
         self.split = split
-        self.dataset = load_dataset("bentrevett/multi30k", split=self.split)
-        self.vocab_de = {'<pad>': 0, '<sos>': 1, '<eos>': 2, '<unk>': 3}
-        self.vocab_en = {'<pad>': 0, '<sos>': 1, '<eos>': 2, '<unk>': 3}
+        self.dataset = load_dataset("bentrevett/multi30k", split=split)
+
+        if vocab_de is None or vocab_en is None:
+            vocab_de, vocab_en = build_vocab_from_train()
+
+        self.vocab_de = vocab_de
+        self.vocab_en = vocab_en
         self.data = []
-        
-        self.build_vocab()
         self.process_data()
 
-    def build_vocab(self):
-        train_data = load_dataset("bentrevett/multi30k", split='train')
-        for item in train_data:
-            for tok in spacy_de.tokenizer(item['de']):
-                if tok.text not in self.vocab_de:
-                    self.vocab_de[tok.text] = len(self.vocab_de)
-            for tok in spacy_en.tokenizer(item['en']):
-                if tok.text not in self.vocab_en:
-                    self.vocab_en[tok.text] = len(self.vocab_en)
+    def numericalize_de(self, text: str):
+        tokens = tokenize_de(text)
+        return [self.vocab_de.get(tok, UNK_IDX) for tok in tokens]
+
+    def numericalize_en(self, text: str):
+        tokens = tokenize_en(text)
+        return [self.vocab_en.get(tok, UNK_IDX) for tok in tokens]
 
     def process_data(self):
+        self.data = []
         for item in self.dataset:
-            de_tokens = [self.vocab_de.get(tok.text, 3) for tok in spacy_de.tokenizer(item['de'])]
-            en_tokens = [self.vocab_en.get(tok.text, 3) for tok in spacy_en.tokenizer(item['en'])]
-            
-            de_tensor = torch.tensor([1] + de_tokens + [2])
-            en_tensor = torch.tensor([1] + en_tokens + [2])
-            
+            de_tokens = self.numericalize_de(item["de"])
+            en_tokens = self.numericalize_en(item["en"])
+
+            de_tensor = torch.tensor([SOS_IDX] + de_tokens + [EOS_IDX], dtype=torch.long)
+            en_tensor = torch.tensor([SOS_IDX] + en_tokens + [EOS_IDX], dtype=torch.long)
+
             self.data.append((de_tensor, en_tensor))
 
     def __len__(self):
@@ -44,13 +117,12 @@ class Multi30kDataset(Dataset):
     def __getitem__(self, idx):
         return self.data[idx]
 
+
 def collate_fn(batch):
-    de_batch, en_batch = [], []
-    for de_item, en_item in batch:
-        de_batch.append(de_item)
-        en_batch.append(en_item)
-    
-    de_batch = pad_sequence(de_batch, padding_value=0, batch_first=True)
-    en_batch = pad_sequence(en_batch, padding_value=0, batch_first=True)
-    
-    return de_batch, en_batch
+    src_batch = [item[0] for item in batch]
+    tgt_batch = [item[1] for item in batch]
+
+    src_batch = pad_sequence(src_batch, batch_first=True, padding_value=PAD_IDX)
+    tgt_batch = pad_sequence(tgt_batch, batch_first=True, padding_value=PAD_IDX)
+
+    return src_batch, tgt_batch
