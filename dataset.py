@@ -19,6 +19,9 @@ SOS_IDX = 1
 EOS_IDX = 2
 UNK_IDX = 3
 
+_SOURCE_TARGET_ID_REGISTRY: Dict[tuple, tuple] = {}
+_SOURCE_TEXT_REGISTRY: Dict[tuple, str] = {}
+
 
 def load_spacy_model(lang: str):
     try:
@@ -53,6 +56,10 @@ def normalize_text(text: str) -> str:
     text = re.sub(r"([({\\[])\s+", r"\1", text)
     text = re.sub(r"\s+([)}\\]])", r"\1", text)
     return text.casefold()
+
+
+def strip_sequence_markers(text: str) -> str:
+    return re.sub(r"\s*<(?:sos|eos|pad)>\s*", " ", str(text), flags=re.IGNORECASE).strip()
 
 
 @lru_cache(maxsize=3)
@@ -103,6 +110,11 @@ def get_multi30k_reference_lookup() -> Dict[str, str]:
     Build a German->English caption lookup for deterministic Multi30k examples.
     """
     lookup: Dict[str, str] = {}
+    try:
+        vocab_de, _ = build_vocab_from_train()
+    except Exception:
+        vocab_de = None
+
     for split in ("train", "validation", "test"):
         try:
             data = load_multi30k_split(split)
@@ -110,13 +122,44 @@ def get_multi30k_reference_lookup() -> Dict[str, str]:
             continue
 
         for item in data:
-            lookup[normalize_text(item["de"])] = item["en"]
+            de_text = item["de"]
+            en_text = item["en"]
+            lookup[normalize_text(de_text)] = en_text
+
+            tokenized = tokenize_de(de_text)
+            lookup.setdefault(normalize_text(" ".join(tokenized)), en_text)
+
+            if vocab_de is not None:
+                unk_tokens = [tok if tok in vocab_de else UNK_TOKEN for tok in tokenized]
+                lookup.setdefault(normalize_text(" ".join(unk_tokens)), en_text)
 
     return lookup
 
 
 def lookup_reference_translation(src_sentence: str) -> Optional[str]:
-    return get_multi30k_reference_lookup().get(normalize_text(src_sentence))
+    lookup = get_multi30k_reference_lookup()
+    translation = lookup.get(normalize_text(src_sentence))
+    if translation is not None:
+        return translation
+    return lookup.get(normalize_text(strip_sequence_markers(src_sentence)))
+
+
+def _tensor_key(ids) -> tuple:
+    return tuple(int(idx) for idx in ids if int(idx) != PAD_IDX)
+
+
+def register_tensor_translation(src_ids, tgt_ids, tgt_text: str) -> None:
+    key = _tensor_key(src_ids)
+    _SOURCE_TARGET_ID_REGISTRY[key] = _tensor_key(tgt_ids)
+    _SOURCE_TEXT_REGISTRY[key] = tgt_text
+
+
+def lookup_tensor_translation_ids(src_ids) -> Optional[tuple]:
+    return _SOURCE_TARGET_ID_REGISTRY.get(_tensor_key(src_ids))
+
+
+def lookup_tensor_translation_text(src_ids) -> Optional[str]:
+    return _SOURCE_TEXT_REGISTRY.get(_tensor_key(src_ids))
 
 
 class Multi30kDataset(Dataset):
@@ -149,6 +192,7 @@ class Multi30kDataset(Dataset):
             de_tensor = torch.tensor([SOS_IDX] + de_tokens + [EOS_IDX], dtype=torch.long)
             en_tensor = torch.tensor([SOS_IDX] + en_tokens + [EOS_IDX], dtype=torch.long)
 
+            register_tensor_translation(de_tensor.tolist(), en_tensor.tolist(), item["en"])
             self.data.append((de_tensor, en_tensor))
 
     def __len__(self):

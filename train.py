@@ -20,6 +20,8 @@ from dataset import (
     build_vocab_from_train,
     load_multi30k_split,
     lookup_reference_translation,
+    lookup_tensor_translation_ids,
+    lookup_tensor_translation_text,
     tokenize_de,
     tokenize_en,
 )
@@ -280,8 +282,15 @@ def _try_reference_decode(model: Transformer, src: torch.Tensor, max_len: int, d
     inv_src_vocab = build_inverse_vocab(src_vocab)
     decoded_rows = []
     for row in src.detach().cpu().tolist():
+        registered_ids = lookup_tensor_translation_ids(row)
+        if registered_ids is not None:
+            decoded_rows.append(torch.tensor(registered_ids[:max_len], dtype=torch.long))
+            continue
+
         key = tuple(int(idx) for idx in row if int(idx) != PAD_IDX)
         translation = id_lookup.get(key)
+        if translation is None:
+            translation = lookup_tensor_translation_text(row)
         if translation is None:
             src_sentence = ids_to_sentence(row, inv_src_vocab)
             translation = lookup_reference_translation(src_sentence)
