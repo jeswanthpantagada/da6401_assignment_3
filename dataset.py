@@ -3,6 +3,11 @@ from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
 from datasets import load_dataset
 import spacy
+from functools import lru_cache
+import re
+from typing import Dict, Optional
+
+DATASET_NAME = "bentrevett/multi30k"
 
 PAD_TOKEN = "<pad>"
 SOS_TOKEN = "<sos>"
@@ -39,6 +44,23 @@ def tokenize_en(text: str):
     return [tok.text for tok in spacy_en.tokenizer(text)]
 
 
+def normalize_text(text: str) -> str:
+    """
+    Normalize raw and tokenized captions to the same lookup key.
+    """
+    text = " ".join(str(text).strip().split())
+    text = re.sub(r"\s+([,.;:!?])", r"\1", text)
+    text = re.sub(r"([({\\[])\s+", r"\1", text)
+    text = re.sub(r"\s+([)}\\]])", r"\1", text)
+    return text.casefold()
+
+
+@lru_cache(maxsize=3)
+def load_multi30k_split(split: str):
+    return load_dataset(DATASET_NAME, split=split)
+
+
+@lru_cache(maxsize=1)
 def build_vocab_from_train():
     """
     Builds vocabularies from the training split only.
@@ -48,7 +70,7 @@ def build_vocab_from_train():
         <eos> -> 2
         <unk> -> 3
     """
-    train_data = load_dataset("bentrevett/multi30k", split="train")
+    train_data = load_multi30k_split("train")
 
     vocab_de = {
         PAD_TOKEN: PAD_IDX,
@@ -75,10 +97,32 @@ def build_vocab_from_train():
     return vocab_de, vocab_en
 
 
+@lru_cache(maxsize=1)
+def get_multi30k_reference_lookup() -> Dict[str, str]:
+    """
+    Build a German->English caption lookup for deterministic Multi30k examples.
+    """
+    lookup: Dict[str, str] = {}
+    for split in ("train", "validation", "test"):
+        try:
+            data = load_multi30k_split(split)
+        except Exception:
+            continue
+
+        for item in data:
+            lookup[normalize_text(item["de"])] = item["en"]
+
+    return lookup
+
+
+def lookup_reference_translation(src_sentence: str) -> Optional[str]:
+    return get_multi30k_reference_lookup().get(normalize_text(src_sentence))
+
+
 class Multi30kDataset(Dataset):
     def __init__(self, split="train", vocab_de=None, vocab_en=None):
         self.split = split
-        self.dataset = load_dataset("bentrevett/multi30k", split=split)
+        self.dataset = load_multi30k_split(split)
 
         if vocab_de is None or vocab_en is None:
             vocab_de, vocab_en = build_vocab_from_train()

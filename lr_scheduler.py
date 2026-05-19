@@ -18,6 +18,11 @@ class NoamScheduler:
         warmup_steps: int,
         last_step: int = 0,
     ) -> None:
+        if d_model <= 0:
+            raise ValueError("d_model must be positive")
+        if warmup_steps <= 0:
+            raise ValueError("warmup_steps must be positive")
+
         self.optimizer = optimizer
         self.d_model = d_model
         self.warmup_steps = warmup_steps
