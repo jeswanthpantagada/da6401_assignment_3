@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.py[cod]
+checkpoints/
+*.pt
+*.pth
+training_curves.png
+accuracy_curves.png
+bleu_curve.png
+wandb/
