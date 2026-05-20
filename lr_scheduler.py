@@ -1,7 +1,9 @@
+import math
+from typing import List
+
 import torch
 import torch.optim as optim
 import matplotlib.pyplot as plt
-from typing import List
 
 
 class NoamScheduler:
@@ -39,8 +41,10 @@ class NoamScheduler:
     def step(self) -> float:
         self.step_num += 1
         lr = self._rate(self.step_num)
+
         for group in self.optimizer.param_groups:
             group["lr"] = lr
+
         self._last_lr = [lr for _ in self.optimizer.param_groups]
         return lr
 
@@ -80,6 +84,7 @@ def get_lr_history(
     history = []
     for _ in range(total_steps):
         history.append(scheduler.step())
+
     return history
 
 
@@ -106,7 +111,11 @@ def verify_scheduler_properties(
     warmup_steps: int = 4000,
     total_steps: int = 10000,
 ) -> None:
-    lrs = get_lr_history(d_model=d_model, warmup_steps=warmup_steps, total_steps=total_steps)
+    lrs = get_lr_history(
+        d_model=d_model,
+        warmup_steps=warmup_steps,
+        total_steps=total_steps,
+    )
     peak_step = lrs.index(max(lrs)) + 1
 
     print("=" * 50)
