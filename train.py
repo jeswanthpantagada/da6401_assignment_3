@@ -22,7 +22,7 @@ from model import Transformer, make_src_mask, make_tgt_mask
 
 CONFIG = {
     "seed": 42,
-    "project": "da6401-assignment-3",
+    "project": "DA_DL_Ass3",
     "run_name": "transformer-baseline",
     "d_model": 256,
     "num_heads": 8,
@@ -57,6 +57,14 @@ def set_seed(seed: int) -> None:
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = False
     torch.backends.cudnn.benchmark = True
+
+
+def get_device() -> torch.device:
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+    if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+        return torch.device("mps")
+    return torch.device("cpu")
 
 
 def build_dataloaders(
@@ -248,6 +256,32 @@ def evaluate_bleu(
     return BLEU_SCORE(predictions, references)
 
 
+def build_model(src_vocab_size: int, tgt_vocab_size: int) -> Transformer:
+    """
+    Create a fresh model for training. We temporarily disable any auto-load
+    logic so training does not accidentally start from an old checkpoint.
+    """
+    original_autoload = None
+    if hasattr(Transformer, "_try_autoload_checkpoint"):
+        original_autoload = Transformer._try_autoload_checkpoint
+        Transformer._try_autoload_checkpoint = lambda self: None
+
+    model = Transformer(
+        src_vocab_size=src_vocab_size,
+        tgt_vocab_size=tgt_vocab_size,
+        d_model=CONFIG["d_model"],
+        N=CONFIG["num_layers"],
+        num_heads=CONFIG["num_heads"],
+        d_ff=CONFIG["d_ff"],
+        dropout=CONFIG["dropout"],
+    )
+
+    if original_autoload is not None:
+        Transformer._try_autoload_checkpoint = original_autoload
+
+    return model
+
+
 def run_epoch(
     model: Transformer,
     loader: DataLoader,
@@ -395,7 +429,7 @@ def plot_history(history: Dict[str, List[float]], save_path: str = "training_cur
 
 def main() -> None:
     set_seed(CONFIG["seed"])
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    device = get_device()
     print(f"Using device: {device}")
 
     try:
@@ -412,16 +446,7 @@ def main() -> None:
     src_vocab_size = len(vocab_de)
     tgt_vocab_size = len(vocab_en)
 
-    model = Transformer(
-        src_vocab_size=src_vocab_size,
-        tgt_vocab_size=tgt_vocab_size,
-        d_model=CONFIG["d_model"],
-        N=CONFIG["num_layers"],
-        num_heads=CONFIG["num_heads"],
-        d_ff=CONFIG["d_ff"],
-        dropout=CONFIG["dropout"],
-    ).to(device)
-
+    model = build_model(src_vocab_size, tgt_vocab_size).to(device)
     model.src_vocab = vocab_de
     model.tgt_vocab = vocab_en
     model.inv_tgt_vocab = build_inverse_vocab(vocab_en)
