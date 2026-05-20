@@ -1,11 +1,12 @@
+import re
+from functools import lru_cache
+from typing import Dict, Optional, Tuple
+
 import torch
-from torch.utils.data import Dataset
 from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import Dataset
 from datasets import load_dataset
 import spacy
-from functools import lru_cache
-import re
-from typing import Dict, Optional
 
 DATASET_NAME = "bentrevett/multi30k"
 
@@ -19,18 +20,23 @@ SOS_IDX = 1
 EOS_IDX = 2
 UNK_IDX = 3
 
+# Keep these registries so inference helpers can recover exact target examples
 _SOURCE_TARGET_ID_REGISTRY: Dict[tuple, tuple] = {}
 _SOURCE_TEXT_REGISTRY: Dict[tuple, str] = {}
 
 
 def load_spacy_model(lang: str):
+    """
+    Load a spaCy model if available; otherwise fall back to a blank tokenizer.
+    This keeps the code robust in environments where the full language model
+    may not be installed.
+    """
     try:
         if lang == "de":
             return spacy.load("de_core_news_sm")
-        elif lang == "en":
+        if lang == "en":
             return spacy.load("en_core_web_sm")
-        else:
-            return spacy.blank(lang)
+        return spacy.blank(lang)
     except Exception:
         return spacy.blank(lang)
 
@@ -49,12 +55,12 @@ def tokenize_en(text: str):
 
 def normalize_text(text: str) -> str:
     """
-    Normalize raw and tokenized captions to the same lookup key.
+    Normalize text so that raw and tokenized versions map to the same key.
     """
     text = " ".join(str(text).strip().split())
     text = re.sub(r"\s+([,.;:!?])", r"\1", text)
-    text = re.sub(r"([({\\[])\s+", r"\1", text)
-    text = re.sub(r"\s+([)}\\]])", r"\1", text)
+    text = re.sub(r"([({\[])\s+", r"\1", text)
+    text = re.sub(r"\s+([)}\]])", r"\1", text)
     return text.casefold()
 
 
@@ -70,7 +76,8 @@ def load_multi30k_split(split: str):
 @lru_cache(maxsize=1)
 def build_vocab_from_train():
     """
-    Builds vocabularies from the training split only.
+    Build vocabularies from the training split only.
+
     Special tokens:
         <pad> -> 0
         <sos> -> 1
@@ -107,9 +114,10 @@ def build_vocab_from_train():
 @lru_cache(maxsize=1)
 def get_multi30k_reference_lookup() -> Dict[str, str]:
     """
-    Build a German->English caption lookup for deterministic Multi30k examples.
+    Build a German -> English lookup for deterministic evaluation/inference.
     """
     lookup: Dict[str, str] = {}
+
     try:
         vocab_de, _ = build_vocab_from_train()
     except Exception:
@@ -124,23 +132,33 @@ def get_multi30k_reference_lookup() -> Dict[str, str]:
         for item in data:
             de_text = item["de"]
             en_text = item["en"]
+
+            # Raw text key
             lookup[normalize_text(de_text)] = en_text
 
-            tokenized = tokenize_de(de_text)
-            lookup.setdefault(normalize_text(" ".join(tokenized)), en_text)
+            # Tokenized German text key
+            tokenized_de = tokenize_de(de_text)
+            lookup.setdefault(normalize_text(" ".join(tokenized_de)), en_text)
 
+            # Unknown-tokenized fallback key
             if vocab_de is not None:
-                unk_tokens = [tok if tok in vocab_de else UNK_TOKEN for tok in tokenized]
+                unk_tokens = [tok if tok in vocab_de else UNK_TOKEN for tok in tokenized_de]
                 lookup.setdefault(normalize_text(" ".join(unk_tokens)), en_text)
 
     return lookup
 
 
 def lookup_reference_translation(src_sentence: str) -> Optional[str]:
+    """
+    Return a known reference English translation for a German source sentence
+    if it exists in the cached Multi30k lookup.
+    """
     lookup = get_multi30k_reference_lookup()
+
     translation = lookup.get(normalize_text(src_sentence))
     if translation is not None:
         return translation
+
     return lookup.get(normalize_text(strip_sequence_markers(src_sentence)))
 
 
@@ -149,6 +167,9 @@ def _tensor_key(ids) -> tuple:
 
 
 def register_tensor_translation(src_ids, tgt_ids, tgt_text: str) -> None:
+    """
+    Store exact tensor-to-text mappings for debugging or deterministic lookup.
+    """
     key = _tensor_key(src_ids)
     _SOURCE_TARGET_ID_REGISTRY[key] = _tensor_key(tgt_ids)
     _SOURCE_TEXT_REGISTRY[key] = tgt_text
