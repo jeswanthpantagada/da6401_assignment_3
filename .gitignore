@@ -8,3 +8,4 @@ training_curves.png
 accuracy_curves.png
 bleu_curve.png
 wandb/
+.DS_Store
